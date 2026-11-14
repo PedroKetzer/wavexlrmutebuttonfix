@@ -83,6 +83,52 @@ Observed on the tested unit and not fully explained: before the fallback block w
 written, the device sometimes powered on with its last live config instead. After the
 write it always powers on with the fallback block.
 
+## Root cause
+
+The symptom is the firmware honoring `mute_enabled = 0`: a tap can still **unmute**, but
+it can no longer **mute**. This is a real setting ("Mute button is enabled" in Wave
+Link's `WaveAPI`), but no Elgato app shows it in its UI. No physical gesture we tried
+changed it either. So how did it get switched off?
+
+Four macOS Wave Link builds were disassembled: 1.6.0 (Nov 2022), 1.9.3 (Mar 2024),
+2.0.6 (Apr 2025) and 2.0.7 (Sep 2025). All four handle the Wave XLR the same way:
+
+1. **The config copy starts zeroed.** When Wave Link detects the device it allocates its
+   34-byte copy of the config filled with zeros, and fills it only when a read from the
+   device succeeds.
+2. **Setters don't check that a read happened.** Changing the mute state, a color, the
+   gain, etc. only checks that the device is a Wave XLR. Then it patches the bytes Wave
+   Link knows about and writes **the whole 34-byte copy** back.
+3. **Wave Link doesn't know byte 27.** Its setters cover mute (4), colors (15–26), gain
+   lock (28), Clipguard (29–32), headphone impedance (33) and the other gain, volume and
+   low-cut bytes. Nothing ever touches `mute_enabled`.
+
+If a write happens before a successful read (a failed read on connect, on wake, or after
+a USB hiccup), every byte Wave Link doesn't manage goes out as `0`, including
+`mute_enabled`. The bytes it does manage go out with its own saved values, so nothing
+looks wrong.
+
+The zero then becomes permanent:
+
+- The firmware stores setting changes in the power-on block itself (watched live:
+  toggling phantom power with the dial rewrites `wValue 0x02`).
+- Wave Link can also copy its whole buffer to that block with **Save Settings to
+  Hardware**. In 1.x this only happens when you click the button. Since 2.0, Wave Link
+  does it automatically every time the mic settings panel closes.
+
+From then on the unit powers on with the touch-mute disabled, on any computer.
+
+This matches the tested unit. Its power-on block had sane values in every field Wave
+Link manages, and `0` only in byte 27. Two other unmanaged bytes (5 and 14) were correct,
+but both can be changed from the hardware controls, so the firmware rewrites them. Byte
+27 has no hardware control, so nothing ever put it back.
+
+Wave Link 3.5.0's scrambled settings (below) look like the same design flaw. The
+difference is that its copy holds uninitialized memory instead of zeros.
+
+There are no logs from when the touch-mute stopped working on this unit, so the exact
+event can't be pinned down. The code path above is present in every version checked.
+
 ## Known issue: Wave Link 3.5.0 scrambles the settings
 
 On the tested unit, **Wave Link 3.5.0** wrote garbage to the Wave XLR about 0.1 s after
